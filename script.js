@@ -9,10 +9,154 @@ const themeToggle = document.querySelector("#theme-toggle-btn");
 //API setup
 const API_KEY = "AIzaSyC0EVsAN0R_WTSv3vnLRoC7MMXU5iUjIII";
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${API_KEY}`;
+const SEARCH_API_URL = "https://en.wikipedia.org/w/api.php";
 
 let typingInterval, controller;
 const chatHistory = [];
 const userData = { message: "", file: {} };
+
+// Function to check if query can be answered directly from FURIA_DATA
+const checkFuriaData = (query) => {
+    query = query.toLowerCase();
+
+    // Check if query is directly in commonQuestions
+    for (const [question, answer] of Object.entries(FURIA_DATA.commonQuestions)) {
+        if (query.includes(question.toLowerCase())) {
+            return { directAnswer: true, data: answer };
+        }
+    }
+
+    // Check for team-specific questions
+    for (const [teamName, teamData] of Object.entries(FURIA_DATA.teams)) {
+        if (query.includes(teamName.toLowerCase())) {
+            // Portuguese keywords for roster/players
+            if (query.includes("roster") || query.includes("players") || query.includes("team") ||
+                query.includes("jogadores") || query.includes("elenco") || query.includes("time") ||
+                query.includes("equipe") || query.includes("lineup")) {
+                return {
+                    directAnswer: false,
+                    data: `FURIA ${teamName} Team Information:\n${JSON.stringify(teamData, null, 2)}`
+                };
+            // Portuguese keywords for achievements/tournaments
+            } else if (query.includes("achievement") || query.includes("tournament") || query.includes("win") ||
+                       query.includes("conquista") || query.includes("torneio") || query.includes("campeonato") ||
+                       query.includes("vitória") || query.includes("título") || query.includes("venceu") ||
+                       query.includes("ganhou")) {
+                return {
+                    directAnswer: false,
+                    data: `FURIA ${teamName} Achievements:\n${JSON.stringify(teamData.majorAchievements, null, 2)}`
+                };
+            // Portuguese keywords for history
+            } else if (query.includes("history") || query.includes("história") || query.includes("historico") ||
+                       query.includes("trajetória") || query.includes("percurso")) {
+                return {
+                    directAnswer: false,
+                    data: `FURIA ${teamName} History:\n${teamData.history}`
+                };
+            }
+        }
+    }
+
+    // Check for upcoming matches - Portuguese keywords
+    if (query.includes("match") || query.includes("schedule") || query.includes("upcoming") || query.includes("next game") ||
+        query.includes("partida") || query.includes("jogo") || query.includes("agenda") || query.includes("calendário") ||
+        query.includes("próximo") || query.includes("quando") || query.includes("horário") || query.includes("data")) {
+        return {
+            directAnswer: false,
+            data: `FURIA Upcoming Matches:\n${JSON.stringify(FURIA_DATA.upcomingMatches, null, 2)}`
+        };
+    }
+
+    // Check for award information - Portuguese keywords
+    if (query.includes("award") || query.includes("trophy") || query.includes("recognition") ||
+        query.includes("prêmio") || query.includes("premiação") || query.includes("troféu") ||
+        query.includes("reconhecimento") || query.includes("medalha")) {
+        return {
+            directAnswer: false,
+            data: `FURIA Awards:\n${JSON.stringify(FURIA_DATA.awards, null, 2)}`
+        };
+    }
+
+    // Check for organization information - Portuguese keywords
+    if (query.includes("organization") || query.includes("founder") || query.includes("company") ||
+        query.includes("organização") || query.includes("fundador") || query.includes("empresa") ||
+        query.includes("criador") || query.includes("dono") || query.includes("proprietário")) {
+        return {
+            directAnswer: false,
+            data: `FURIA Organization Information:\n${JSON.stringify(FURIA_DATA.organization, null, 2)}`
+        };
+    }
+
+    // If no direct match, return the full data to help with context
+    return {
+        directAnswer: false,
+        data: `FURIA Full Data Context:\n${JSON.stringify({
+            organization: FURIA_DATA.organization,
+            teams: Object.keys(FURIA_DATA.teams).map(team => ({
+                name: team,
+                roster: FURIA_DATA.teams[team].currentRoster || FURIA_DATA.teams[team].formerRoster,
+                achievements: FURIA_DATA.teams[team].majorAchievements?.slice(0, 3) || []
+            }))
+        }, null, 2)}`
+    };
+};
+
+// Function to search for context on the web
+const searchForContext = async (query) => {
+    try {
+        const params = new URLSearchParams({
+            action: "query",
+            list: "search",
+            srsearch: query,
+            format: "json",
+            origin: "*",
+            prop: "extracts",
+            exintro: true,
+            explaintext: true,
+            srlimit: 3
+        });
+
+        const response = await fetch(`${SEARCH_API_URL}?${params}`);
+        const data = await response.json();
+
+        if (data.query && data.query.search && data.query.search.length > 0) {
+            const pageIds = data.query.search.map(result => result.pageid);
+            const contextResults = [];
+
+            for (const pageId of pageIds) {
+                const contentParams = new URLSearchParams({
+                    action: "query",
+                    pageids: pageId,
+                    prop: "extracts",
+                    exintro: true,
+                    explaintext: true,
+                    format: "json",
+                    origin: "*"
+                });
+
+                const contentResponse = await fetch(`${SEARCH_API_URL}?${contentParams}`);
+                const contentData = await contentResponse.json();
+
+                if (contentData.query && contentData.query.pages) {
+                    const page = contentData.query.pages[pageId];
+                    if (page && page.extract) {
+                        contextResults.push({
+                            title: page.title,
+                            extract: page.extract
+                        });
+                    }
+                }
+            }
+
+            return contextResults;
+        }
+
+        return [];
+    } catch (error) {
+        console.error("Error searching for context:", error);
+        return [];
+    }
+};
 
 //function to create message elements
 const createMsgElement = (content, ...classes) => {
@@ -25,23 +169,60 @@ const createMsgElement = (content, ...classes) => {
 //scroll to the bottom of the container
 const scrollToBottom = () => container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
 
+// Format the response text to preserve paragraphs
+const formatResponseText = (text) => {
+    // Replace markdown formatting with HTML
+    const formattedText = text
+        // Headers
+        .replace(/^### (.*$)/gm, '<h3>$1</h3>')
+        .replace(/^## (.*$)/gm, '<h2>$1</h2>')
+        .replace(/^# (.*$)/gm, '<h1>$1</h1>')
+        // Bold and italic
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+        // Links
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>')
+        // Unordered lists
+        .replace(/^\s*[\-\*]\s+(.*)/gm, '<li>$1</li>')
+        // Ordered lists
+        .replace(/^\s*(\d+)\.\s+(.*)/gm, '<li>$2</li>')
+        // Code blocks
+        .replace(/```([^`]*)```/g, '<pre><code>$1</code></pre>')
+        // Inline code
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        // Paragraphs and line breaks
+        .replace(/\n\n/g, "</p><p>")
+        .replace(/\n/g, "<br>");
+
+    // Wrap lists in appropriate containers
+    let wrappedText = formattedText
+        .replace(/<li>.*?<\/li>/g, match => {
+            if (!match.startsWith('<ul>') && !match.startsWith('<ol>')) {
+                return `<ul>${match}</ul>`;
+            }
+            return match;
+        });
+
+    // Clean up potentially redundant nested list tags
+    wrappedText = wrappedText
+        .replace(/<\/ul><ul>/g, '')
+        .replace(/<\/ol><ol>/g, '');
+
+    return `<p>${wrappedText}</p>`;
+};
+
 // Simulate typing effect for bot response
 const typingEffect = (text, textElement, botMsgDiv) => {
-    textElement.textContent = "";
-    const words = text.split(" ");
-    let wordIndex = 0;
+    // Format the text to preserve paragraphs
+    const formattedText = formatResponseText(text);
+    textElement.innerHTML = "";
 
-    // Set an interval top type each word
-    typingInterval = setInterval(() => {
-        if (wordIndex < words.length) {
-            textElement.textContent += (wordIndex === 0 ? "" : " ") + words[wordIndex++];
-            scrollToBottom();
-        } else {
-            clearInterval(typingInterval);
-            botMsgDiv.classList.remove("loading");
-            document.body.classList.remove("bot-responding");
-        }
-    }, 40);
+    // Set the innerHTML directly for formatted text with paragraphs
+    textElement.innerHTML = formattedText;
+    scrollToBottom();
+
+    botMsgDiv.classList.remove("loading");
+    document.body.classList.remove("bot-responding");
 }
 
 // Make de API call and generate the bot's response
@@ -49,18 +230,91 @@ const generateResponse = async (botMsgDiv) => {
     const textElement = botMsgDiv.querySelector(".message-text");
     controller = new AbortController();
 
-    //Add user message and file data to the chat history
-    chatHistory.push({
-        role: "user",
-        parts: [{ text: userData.message }, ...(userData.file.data ? [{ inline_data: (({ fileName, isImage, ...rest }) => rest)(userData.file) }] : [])]
-    });
-
     try {
+        // First check if we can answer directly from FURIA_DATA
+        const furiaDataResult = checkFuriaData(userData.message);
+
+        // If we have a direct answer, use it immediately
+        if (furiaDataResult.directAnswer) {
+            chatHistory.push({
+                role: "user",
+                parts: [{ text: userData.message }, ...(userData.file.data ? [{ inline_data: (({ fileName, isImage, ...rest }) => rest)(userData.file) }] : [])]
+            });
+
+            const response = furiaDataResult.data;
+            typingEffect(response, textElement, botMsgDiv);
+
+            chatHistory.push({ role: "model", parts: [{ text: response }] });
+            userData.file = {};
+            return;
+        }
+
+        // If not a direct answer, search for context on the web
+        const contextResults = await searchForContext(userData.message);
+
+        // Combine web search results with FURIA_DATA context
+        const webContextText = contextResults.length > 0
+            ? `Here's some relevant information from the web that might help answer the query:\n\n${contextResults.map(result =>
+                `WEB TITLE: ${result.title}\nWEB INFORMATION: ${result.extract}`).join('\n\n')}`
+            : "";
+
+        const furiaContextText = `Here's specific information from FURIA Esports:\n\n${furiaDataResult.data}`;
+
+        const combinedContext = `${webContextText}\n\n${furiaContextText}`;
+
+        // Add user message and file data to the chat history
+        chatHistory.push({
+            role: "user",
+            parts: [{ text: userData.message }, ...(userData.file.data ? [{ inline_data: (({ fileName, isImage, ...rest }) => rest)(userData.file) }] : [])]
+        });
+
+        // Add context information
+        chatHistory.push({
+            role: "model",
+            parts: [{ text: "I'll help with that. Let me check some information first." }]
+        });
+
+        chatHistory.push({
+            role: "user",
+            parts: [{ text: `CONTEXT INFORMATION: ${combinedContext}\n\nPlease use this context to help answer my previous question: ${userData.message}` }]
+        });
+
+        // Current date information to provide to the model
+        const currentDate = new Date();
+        const dateInfo = `Current date: ${currentDate.toLocaleDateString()}`;
+
         // Send the chat history to the API to get a response
         const response = await fetch(API_URL, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ contents: chatHistory }),
+            body: JSON.stringify({
+                contents: chatHistory,
+                systemInstruction: {
+                    parts: [
+                        { text: `Você é o FURIA Chatbot, um assistente útil para fãs do time FURIA Esports. Seja conversacional e envolvente, formatando suas respostas com parágrafos quando apropriado. Priorize informações do banco de dados da FURIA para perguntas específicas sobre a FURIA, mas use seu conhecimento mais amplo para fornecer respostas informativas quando apropriado. ${dateInfo}
+
+IMPORTANTE: ${FURIA_DATA.uncertaintyInstructions.general}
+
+Você é um assistente de IA com conhecimento sobre esports e jogos em geral. Embora seu foco principal seja a FURIA Esports, você também pode fornecer informações sobre outras equipes, jogos, torneios e o ecossistema mais amplo de esports.
+
+REGRAS IMPORTANTES:
+1. SEMPRE responda EXCLUSIVAMENTE em português brasileiro, independentemente do idioma da pergunta.
+2. Se o tópico da conversa não estiver relacionado a esports, jogos ou temas próximos, recuse-se educadamente a responder, explicando que seu propósito é fornecer informações sobre FURIA Esports e o cenário de esports em geral.
+3. Se a conversa se tornar acalorada, controversa ou inapropriada, recuse-se educadamente a continuar e redirecione para tópicos relacionados a esports.
+
+Para respostas incertas sobre tópicos específicos da FURIA, você pode consultar estas fontes recomendadas:
+${FURIA_DATA.uncertaintyInstructions.recommendedSources.map(source => {
+    if (source.urls) {
+        return `- ${source.name}: Várias páginas específicas de jogos`;
+    } else {
+        return `- ${source.name}: ${source.url}`;
+    }
+}).join('\n')}
+
+Se você precisar fornecer uma fonte específica de um jogo, use o link apropriado do Liquipedia com base no jogo (CS2, Valorant, Rainbow Six, etc.).` }
+                    ]
+                }
+            }),
             signal: controller.signal
         });
 
@@ -68,7 +322,7 @@ const generateResponse = async (botMsgDiv) => {
         if (!response.ok) throw new Error(data.error.message);
 
         // Process the response text and display with typing effect
-        const responseText = data.candidates[0].content.parts[0].text.replace(/\*\*([^*]+)\*\*/g, "$1").trim();
+        const responseText = data.candidates[0].content.parts[0].text.trim();
         typingEffect(responseText, textElement, botMsgDiv);
 
         chatHistory.push({ role: "model", parts: [{ text: responseText }] });
@@ -103,7 +357,7 @@ const handleFormSubmit = (e) => {
 
     setTimeout(() => {
         // Generate bot message HTML and add in the chats container after 600ms
-        const botMsgHTML = `<img src="images/LogoDourada.jpeg" class="avatar"><p class="message-text">Just a sec..</p>`;
+        const botMsgHTML = `<img src="images/LogoDourada.jpeg" class="avatar"><div class="message-text">Just a sec..</div>`;
         const botMsgDiv = createMsgElement(botMsgHTML, "bot-message", "loading");
         chatsContainer.appendChild(botMsgDiv);
         scrollToBottom();
